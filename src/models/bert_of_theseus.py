@@ -525,7 +525,7 @@ class BERTOfTheseus:
         use_kd_loss: bool = True,
         kd_T: float = 3.0,
         kd_alpha: float = 0.5,
-        use_projection: bool = True
+        use_soft_replacement: bool = True  # Dùng SoftMixModule + KD Loss (cách sạch nhất)
     ):
         self.predecessor = predecessor.to(device)
         self.successor = successor.to(device)
@@ -535,18 +535,22 @@ class BERTOfTheseus:
         self.use_kd_loss = use_kd_loss
         self.kd_T = kd_T
         self.kd_alpha = kd_alpha
+        # Lưu lại để alpha scheduler trong module_replacement_training kích hoạt đúng
+        self.use_soft_replacement = use_soft_replacement
         
         # Get number of classes from classifier
         self.num_classes = successor.classifier.out_features
         
-        # Create Mix model
+        # Create Mix model:
+        # - use_soft_replacement=True  → SoftMixModule (alpha nội suy từ Teacher → Student)
+        # - use_projection=False       → Không gài Projection Layer vào giữa, tránh Distribution Shift
         self.mix_model = MixModel(
             predecessor,
             successor,
             initial_replacement_rate,
             use_optimization,
-            use_soft_replacement=False,
-            use_projection=use_projection
+            use_soft_replacement=use_soft_replacement,
+            use_projection=False
         ).to(device)
         
         # Loss function: MSE (Equation 7) as per paper Section 3.2
