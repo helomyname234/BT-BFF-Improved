@@ -525,7 +525,7 @@ class BERTOfTheseus:
         use_kd_loss: bool = True,
         kd_T: float = 3.0,
         kd_alpha: float = 0.5,
-        use_soft_replacement: bool = True  # Dùng SoftMixModule + KD Loss (cách sạch nhất)
+        use_soft_replacement: bool = False  # Đổi lại False để OptimizedMixModule được kích hoạt
     ):
         self.predecessor = predecessor.to(device)
         self.successor = successor.to(device)
