@@ -23,6 +23,21 @@ import numpy as np
 from typing import Tuple, Optional, List
 import math
 
+def knowledge_distillation_loss(student_logits, teacher_logits, labels, criterion_mse, T=3.0, alpha=0.5):
+    """
+    Computes a combination of MSE loss and KL Divergence loss (Logit Distillation).
+    """
+    mse_loss = criterion_mse(student_logits, labels)
+    
+    soft_student = F.log_softmax(student_logits / T, dim=1)
+    with torch.no_grad():
+        soft_teacher = F.softmax(teacher_logits / T, dim=1)
+        
+    # kl_loss = nn.KLDivLoss(reduction='batchmean')(soft_student, soft_teacher) * (T * T)
+    kl_loss = nn.KLDivLoss(reduction='batchmean')(soft_student, soft_teacher)
+    
+    return alpha * mse_loss + (1.0 - alpha) * kl_loss
+
 
 class MixModule(nn.Module):
     """
@@ -89,6 +104,43 @@ class MixModule(nn.Module):
             # During inference, use Successor
             return self.successor_output
 
+class SoftMixModule(nn.Module):
+    """
+    Soft Mix module that interpolates between Predecessor and Successor.
+    
+    Instead of hard binary replacement (0 or 1), this uses a continuous
+    blending weight (alpha) that gradually shifts focus from Teacher to Student.
+    
+    Formula: y_{i+1} = (1 - alpha) * prd_i(y_i) + alpha * scc_i(y_i)
+    """
+    
+    def __init__(
+        self,
+        predecessor_module: nn.Module,
+        successor_module: nn.Module,
+        alpha: float = 0.0
+    ):
+        super(SoftMixModule, self).__init__()
+        self.predecessor_module = predecessor_module
+        self.successor_module = successor_module
+        self.alpha = alpha  # 0.0 = Use only Predecessor, 1.0 = Use only Successor
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Get Predecessor output (Teacher)
+        with torch.no_grad():
+            predecessor_output = self.predecessor_module(x)
+            
+        # Get Successor output (Student)
+        successor_output = self.successor_module(x)
+        
+        if self.training:
+            # SOFT REPLACEMENT
+            # Detach predecessor_output so gradients only flow to Successor
+            mixed_output = (1.0 - self.alpha) * predecessor_output.detach() + self.alpha * successor_output
+            return mixed_output
+        else:
+            # During inference, use Successor
+            return successor_output
 
 class OptimizedMixModule(nn.Module):
     """
@@ -250,6 +302,58 @@ class OptimizedMixModule(nn.Module):
         else:
             return self.successor_output
 
+class ProjectedMixModule(nn.Module):
+    """
+    Mix module equipped with a Heterogeneous Feature Alignment (Projection) layer.
+    
+    Instead of directly returning the Successor's output (which may be in a different
+    mathematical space due to PoolFormer vs ViT architecture), this module projects
+    the Successor's output into the Predecessor's space before mixing.
+    """
+    
+    def __init__(
+        self,
+        predecessor_module: nn.Module,
+        successor_module: nn.Module,
+        embed_dim: int,
+        replacement_rate: float = 0.5
+    ):
+        super(ProjectedMixModule, self).__init__()
+        self.predecessor_module = predecessor_module
+        self.successor_module = successor_module
+        self.replacement_rate = replacement_rate
+        
+        # Non-linear projection to map PoolFormer features into ViT space
+        self.projection = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+        
+        self.predecessor_output = None
+        self.successor_output = None
+        self.projected_output = None
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            self.predecessor_output = self.predecessor_module(x)
+            
+        self.successor_output = self.successor_module(x)
+        self.projected_output = self.projection(self.successor_output)
+        
+        if self.training:
+            # Equation 5: Sample from Bernoulli distribution
+            r = torch.bernoulli(torch.tensor(1.0 - self.replacement_rate)).item()
+            
+            if r == 1.0:
+                # Use Predecessor output (detached to freeze gradients)
+                return self.predecessor_output.detach()
+            else:
+                # Use Project Successor output
+                return self.projected_output
+        else:
+            # During inference, use Projected Successor output
+            return self.projected_output
+
 
 class MixModel(nn.Module):
     """
@@ -272,7 +376,9 @@ class MixModel(nn.Module):
         predecessor: nn.Module,
         successor: nn.Module,
         replacement_rate: float = 0.5,
-        use_optimization: bool = True
+        use_optimization: bool = True,
+        use_soft_replacement: bool = True,
+        use_projection: bool = True
     ):
         super(MixModel, self).__init__()
         
@@ -280,6 +386,8 @@ class MixModel(nn.Module):
         self.successor = successor
         self.num_modules = len(predecessor.modules_list)
         self.use_optimization = use_optimization
+        self.use_soft_replacement = use_soft_replacement
+        self.use_projection = use_projection
         
         ''' Freeze Predecessor parameters
         for param in predecessor.parameters():
@@ -288,7 +396,27 @@ class MixModel(nn.Module):
         successor.patch_embed.weight.data.copy_(predecessor.patch_embed.projection.weight.data)
         successor.patch_embed.bias.data.copy_(predecessor.patch_embed.projection.bias.data)
         # Create Mix modules
-        if use_optimization:
+        if self.use_projection:
+            embed_dim = predecessor.embed_dim
+            self.mix_modules = nn.ModuleList([
+                ProjectedMixModule(
+                    predecessor.get_module(i),
+                    successor.get_module(i),
+                    embed_dim,
+                    replacement_rate
+                )
+                for i in range(self.num_modules)
+            ])
+        elif self.use_soft_replacement:
+            self.mix_modules = nn.ModuleList([
+                SoftMixModule(
+                    predecessor.get_module(i),
+                    successor.get_module(i),
+                    alpha=0.0 # Bắt đầu từ 0 (100% Teacher)
+                )
+                for i in range(self.num_modules)
+            ])
+        elif use_optimization:
             self.mix_modules = nn.ModuleList([
                 OptimizedMixModule(
                     predecessor.get_module(i),
@@ -351,6 +479,11 @@ class MixModel(nn.Module):
         x = self.classifier(x)
         
         return x
+    def update_alpha(self, new_alpha: float):
+        """Update alpha for SoftMix modules"""
+        for mix_module in self.mix_modules:
+            if hasattr(mix_module, 'alpha'):
+                mix_module.alpha = new_alpha
     
     def update_replacement_rate(self, new_rate: float):
         """Update replacement rate for all Mix modules"""
@@ -388,13 +521,20 @@ class BERTOfTheseus:
         successor: nn.Module,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         initial_replacement_rate: float = 0.5,
-        use_optimization: bool = True
+        use_optimization: bool = True,
+        use_kd_loss: bool = True,
+        kd_T: float = 3.0,
+        kd_alpha: float = 0.5,
+        use_projection: bool = True
     ):
         self.predecessor = predecessor.to(device)
         self.successor = successor.to(device)
         self.device = device
         self.initial_replacement_rate = initial_replacement_rate
         self.use_optimization = use_optimization
+        self.use_kd_loss = use_kd_loss
+        self.kd_T = kd_T
+        self.kd_alpha = kd_alpha
         
         # Get number of classes from classifier
         self.num_classes = successor.classifier.out_features
@@ -404,7 +544,9 @@ class BERTOfTheseus:
             predecessor,
             successor,
             initial_replacement_rate,
-            use_optimization
+            use_optimization,
+            use_soft_replacement=False,
+            use_projection=use_projection
         ).to(device)
         
         # Loss function: MSE (Equation 7) as per paper Section 3.2
@@ -557,12 +699,29 @@ class BERTOfTheseus:
         
         losses = []
         for epoch in range(epochs):
-            # Schedule replacement rate (linear increase)
-            if schedule_replacement:
-                current_rate = min(0.9, self.initial_replacement_rate + 
-                                 (0.9 - self.initial_replacement_rate) * epoch / epochs)
-                self.mix_model.update_replacement_rate(current_rate)
+            # # Schedule replacement rate (linear increase)
+            # if schedule_replacement:
+            #     current_rate = min(0.9, self.initial_replacement_rate + 
+            #                      (0.9 - self.initial_replacement_rate) * epoch / epochs)
+            #     self.mix_model.update_replacement_rate(current_rate)
             
+            # self.mix_model.train()
+            # Schedule replacement rate OR alpha (linear increase)
+            if schedule_replacement:
+                if getattr(self, 'use_soft_replacement', False):
+                    # Soft replacement: alpha trượt từ 0.0 (100% Teacher) đến 1.0 (100% Student)
+                    current_alpha = min(1.0, epoch / epochs)
+                    self.mix_model.update_alpha(current_alpha)
+                    display_metric = f"| Alpha: {current_alpha:.2f}"
+                else:
+                    # Hard replacement (Code gốc)
+                    current_rate = min(0.9, self.initial_replacement_rate + 
+                                     (0.9 - self.initial_replacement_rate) * epoch / epochs)
+                    self.mix_model.update_replacement_rate(current_rate)
+                    display_metric = f"| Rep Rate: {current_rate:.2f}"
+            else:
+                display_metric = ""
+                
             self.mix_model.train()
             epoch_loss = 0.0
             
@@ -578,7 +737,15 @@ class BERTOfTheseus:
                 
                 # Convert target to one-hot for MSE loss (Equation 7)
                 target_onehot = self._to_onehot(target)
-                loss = self.criterion(output, target_onehot)
+                if self.use_kd_loss:
+                    with torch.no_grad():
+                        teacher_logits = self.predecessor(data)
+                    loss = knowledge_distillation_loss(
+                        output, teacher_logits, target_onehot, 
+                        self.criterion, self.kd_T, self.kd_alpha
+                    )
+                else:
+                    loss = self.criterion(output, target_onehot)
                 loss.backward()
                 optimizer.step()
                 
@@ -587,10 +754,12 @@ class BERTOfTheseus:
             avg_loss = epoch_loss / len(train_loader)
             losses.append(avg_loss)
             
+            # if (epoch + 1) % 50 == 0:
+            #     print(f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, "
+            #           f"Replacement Rate: {current_rate:.2f}" if schedule_replacement 
+            #           else f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
             if (epoch + 1) % 50 == 0:
-                print(f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, "
-                      f"Replacement Rate: {current_rate:.2f}" if schedule_replacement 
-                      else f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+                print(f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f} {display_metric}")
         
         return losses
     
@@ -640,7 +809,15 @@ class BERTOfTheseus:
                 output = self.successor(data)
                 # Convert target to one-hot for MSE loss (Equation 7)
                 target_onehot = self._to_onehot(target)
-                loss = self.criterion(output, target_onehot)
+                if self.use_kd_loss:
+                    with torch.no_grad():
+                        teacher_logits = self.predecessor(data)
+                    loss = knowledge_distillation_loss(
+                        output, teacher_logits, target_onehot, 
+                        self.criterion, self.kd_T, self.kd_alpha
+                    )
+                else:
+                    loss = self.criterion(output, target_onehot)
                 loss.backward()
                 optimizer.step()
                 
