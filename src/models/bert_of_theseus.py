@@ -763,8 +763,8 @@ class BERTOfTheseus:
                             al = mod.get_alignment_loss()
                             if al is not None:
                                 aux_loss = aux_loss + al
-                    # Weight the auxiliary loss (0.03: reduced from 0.1 to prevent over-alignment)
-                    loss = loss + 0.03 * aux_loss
+                    # Weight the auxiliary loss (0.07: balanced between 0.1 and 0.03 based on empirical results)
+                    loss = loss + 0.07 * aux_loss
 
                 loss.backward()
                 optimizer.step()

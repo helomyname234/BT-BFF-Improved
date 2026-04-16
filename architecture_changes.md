@@ -57,22 +57,23 @@ Sau tất cả các quá trình thử nghiệm và fix lỗi, cấu hình chính
 | `aux_loss weight` | `0.1` | ProjectedMixModule alignment loss weight |
 
 ## 6. Giảm Trọng số Auxiliary Alignment Loss: 0.1 → 0.03
-*[16/04/2026 - 20:11]*
+*[16/04/2026 - 20:11 → 22:25]*
 
-**Bằng chứng thực nghiệm (từ kết quả chạy thực tế):**
+**Bằng chứng thực nghiệm (3 lần thử):**
 
-So sánh Confusion Matrix Init vs kết quả với `aux_loss_weight = 0.1`:
+| Class | Init | aux=0.1 | aux=0.03 | Nhận xét |
+|---|---|---|---|---|
+| BENIGN | 96.75% | 96.15% | **93.65%** | 0.03 crash BENIGN 3.1%! |
+| DoS GoldenEye | **98.99%** | 98.29% | 98.25% | cả hai đều thấp hơn Init |
+| DoS Hulk | 99.42% | 99.71% | 98.85% | 0.1 tốt hơn |
+| DoS Slowhttptest | 98.76% | 98.69% | 98.76% | như nhau |
+| DoS slowloris | 96.62% | 97.31% | **97.45%** | cả hai đều cải thiện |
 
-| Class | Init | aux=0.1 | Δ |
-|---|---|---|---|
-| BENIGN | 96.75% | 96.15% | ↓ -0.60% |
-| DoS GoldenEye | **98.99%** | 98.29% | ↓ **-0.70%** |
-| DoS Hulk | 99.42% | **99.71%** | ↑ +0.29% |
-| DoS Slowhttptest | 98.76% | 98.69% | ↓ -0.07% |
-| DoS slowloris | 96.62% | **97.31%** | ↑ +0.69% |
+**Phân tích cơ chế:**
+- `weight cao (0.1)` → Student bị "xích cứng" vào Teacher → GoldenEye/Hulk blur (hai class gần nhau trong Teacher space)
+- `weight thấp (0.03)` → Student tự do quá → BENIGN và Hulk mất ranh giới (Student tự học sai hướng)
+- `Init (0.0)` → Không có áp lực alignment nào → Student học hoàn toàn từ Bernoulli Mix và MSE → BENIGN tốt nhất!
 
-**Chẩn đoán nguyên nhân:**
-Với `weight = 0.1`, Auxiliary Alignment Loss có tác động quá mạnh, cưỡng bức Student căn chỉnh đặc trưng (feature) sát với Teacher một cách thái quá. Hệ quả là ranh giới đặc trưng giữa DoS GoldenEye và DoS Hulk bị nhòe (GoldenEye → Hulk nhầm tăng từ **0.19% lên 0.86%** — gần 5 lần!). Auxiliary Loss cao cũng gây ra những spike khổng lồ trong đồ thị Replacement Loss.
+**Thử tiếp: `aux_loss_weight = 0.07`**
+Lệch về phía 0.1 nhiều hơn vì dữ liệu cho thấy 0.1 chỉ tệ hơn 0.6% ở BENIGN trong khi 0.03 tệ hơn 3.1%. Điểm "ngọt" khả năng nằm gần 0.1 hơn là 0.03.
 
-**Giải pháp:**
-Giảm trọng số từ `0.1` xuống `0.03` để Alignment Loss chỉ đóng vai trò **nhắc nhở nhẹ nhàng** (soft regularizer), không can thiệp sâu vào quá trình học phân loại chính.
