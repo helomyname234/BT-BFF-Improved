@@ -22,3 +22,10 @@ $L_{Total} = \alpha * L_{MSE} + (1 - \alpha) * L_{KL\_Div}(T)$
 - `alpha = 0.5` (Trọng số hòa trộn giữa MSE và KL Div).
 
 *Ghi chú:* Các thay đổi này chỉ nhằm mục đích Knowledge Distillation hiệu quả hơn. Hàm Projection của Student sẽ không cần thiết và tự bị loại bỏ khi mang mô hình Successor cuối cùng đi deploy, đảm bảo vẫn duy trì tính chất "Lightweight".
+
+## 3. Cập nhật Interface của Mix Modules (Bug Fix: TypeError)
+*[16/04/2026 - 09:13]*
+
+Khắc phục lỗi `TypeError: ProjectedMixModule.forward() takes 2 positional arguments but 3 were given` do sự không đồng nhất về interface giữa `MixModel.forward()` (khi bật `use_optimization=True`) và các mix module khác nhau.
+- **Giải pháp:** Bổ sung tham số `y_label: Optional[torch.Tensor] = None` vào phương thức `forward()` của các class `MixModule`, `SoftMixModule`, và `ProjectedMixModule`.
+- Sự thay đổi này giúp các module trên tương thích hoàn toàn với cấu trúc gọi linh hoạt của `MixModel` khi nó truyền tham số nhãn `y_label` vào để phục vụ cho Gradient-based Optimization, mặc dù bản thân các module không tối ưu gradient kia không trực tiếp sử dụng tham số này.

@@ -70,7 +70,7 @@ class MixModule(nn.Module):
         self.predecessor_output = None
         self.successor_output = None
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y_label: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass with probabilistic module selection.
         
@@ -125,7 +125,7 @@ class SoftMixModule(nn.Module):
         self.successor_module = successor_module
         self.alpha = alpha  # 0.0 = Use only Predecessor, 1.0 = Use only Successor
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y_label: Optional[torch.Tensor] = None) -> torch.Tensor:
         # Get Predecessor output (Teacher)
         with torch.no_grad():
             predecessor_output = self.predecessor_module(x)
@@ -333,7 +333,7 @@ class ProjectedMixModule(nn.Module):
         self.successor_output = None
         self.projected_output = None
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y_label: Optional[torch.Tensor] = None) -> torch.Tensor:
         with torch.no_grad():
             self.predecessor_output = self.predecessor_module(x)
             
