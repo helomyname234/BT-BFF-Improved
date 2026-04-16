@@ -383,7 +383,7 @@ class MixModel(nn.Module):
         replacement_rate: float = 0.5,
         use_optimization: bool = True,
         use_soft_replacement: bool = True,
-        use_projection: bool = True
+        use_projection: bool = False
     ):
         super(MixModel, self).__init__()
         
@@ -531,7 +531,7 @@ class BERTOfTheseus:
         kd_T: float = 3.0,
         kd_alpha: float = 0.5,
         use_soft_replacement: bool = False,
-        use_projection: bool = True       # Fixed: Auxiliary Loss (no Distribution Shift)
+        use_projection: bool = False       # Fixed: Auxiliary Loss disabled due to causing feature shifting
     ):
         self.predecessor = predecessor.to(device)
         self.successor = successor.to(device)

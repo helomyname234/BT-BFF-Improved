@@ -77,3 +77,22 @@ Sau tất cả các quá trình thử nghiệm và fix lỗi, cấu hình chính
 **Thử tiếp: `aux_loss_weight = 0.07`**
 Lệch về phía 0.1 nhiều hơn vì dữ liệu cho thấy 0.1 chỉ tệ hơn 0.6% ở BENIGN trong khi 0.03 tệ hơn 3.1%. Điểm "ngọt" khả năng nằm gần 0.1 hơn là 0.03.
 
+## 7. Tắt Bỏ Hoàn Toàn Auxiliary Projection Loss (Dựa trên t-SNE)
+*[17/04/2026 - 00:49]*
+
+**Kết quả thử nghiệm aux=0.07:**
+- **BENIGN sập xuống 89.36%** (thấp nhất trong tất cả các lần thử nghiệm).
+- BENIGN bị nhầm thành Hulk tăng vọt lên 5.85% (Init chỉ là 1.43%).
+
+**Bằng chứng từ biểu đồ t-SNE (Successor features before classifier head):**
+- Đám mây đặc trưng (feature cluster) của BENIGN (xanh dương) và DoS Hulk (nâu đỏ) bị **đan xen nhau hoàn toàn**, không có ranh giới rõ ràng.
+- Các class khác như GoldenEye, slowloris, Slowhttptest phân tách rất tốt.
+
+**Kết luận khoa học:**
+Trong không gian đặc trưng trung gian (intermediate feature space) của mạng Teacher (ViT), BENIGN và Hulk có những điểm tương đồng rất lớn. Khi sử dụng Auxiliary Alignment Loss để ép Student (PoolFormer) căn chỉnh theo Teacher, ta đã vô tình ép Student thừa hưởng chính sự mơ hồ này của Teacher ở cấp độ feature map.
+Ngược lại, **KD Loss** hoàn toàn ổn vì nó chỉ ép Student học theo các phân phối logit mềm (soft label) ở output cuối cùng, thời điểm mà Teacher đã phân biệt được các class bằng classifier head.
+
+**Quyết định cuối cùng:**
+- Tắt hoàn toàn Projection và Auxiliary Loss (`use_projection=False`).
+- Chỉ giữ lại **Vanilla Hard Mix + KD Loss + Balanced Sampler**.
+- Bộ combo này đảm bảo không gây nhiễu không gian đặc trưng của Student, đồng thời vẫn khai thác được Dark Knowledge (soft labels) từ Teacher để cải thiện khả năng tổng quát (bằng chứng là slowloris tăng đều qua mọi lần có KD Loss).
