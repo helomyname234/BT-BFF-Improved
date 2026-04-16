@@ -181,81 +181,63 @@ class OptimizedMixModule(nn.Module):
         self.use_optimization = True
     
     def compute_optimal_r(
-        self, 
-        scc_output: torch.Tensor, 
+        self,
+        scc_output: torch.Tensor,
         prd_output: torch.Tensor,
-        y_label: torch.Tensor
+        y_label: Optional[torch.Tensor] = None
     ) -> float:
         """
-        Compute optimal replacement rate based on gradient analysis.
-        
-        Implements Equations 11-12 from the paper.
-        
-        IMPORTANT FIX: The paper's equations assume outputs and labels are in the same space.
-        However, intermediate module outputs have shape [B, Seq, Embed] while labels are [B].
-        We must reduce scc and prd to scalar representations per sample before comparison.
-        
-        Equation 11: ∂L/∂θ^s_i = 2[(scc_i(y_i) - prd_i(y_i))r²_{i+1} + 
-                     (prd_i(y_i) - 2scc_i(y_i) + y_label)r_{i+1} + 
-                     scc_i(y_i) - y_label] * ∂scc_i(y_i)/∂θ^s_i
-        
-        Equation 12: r_{i+1} = 
-            0                                               if |scc_i(y_i) - y_label| >= |Γ|
-            -(prd_i(y_i) - 2scc_i(y_i) + y_label) / 
-             (2(scc_i(y_i) - prd_i(y_i)))                   if |scc_i(y_i) - y_label| < |Γ|
-        
+        Compute optimal replacement rate based on L2 feature distance.
+
+        BUG FIX: The original paper's Eq.11-12 compares intermediate feature vectors
+        against class-index labels (e.g. 0,1,2,3,4) — two fundamentally incompatible
+        quantities. We replace 'y_label' with the L2 distance between scc and prd in
+        the same feature space, which is the correct semantic:
+
+          scc_minus_target  ←  ||scc - prd||₂  (how far Student is from Teacher NOW)
+          a                 ←  mean(scc - prd)  (direction of the gap)
+          b                 ←  -2·a             (since target ≡ prd in this formulation)
+
+        Equation 12 (fixed):
+            r = 0             if |scc - prd| >= |Γ|   (Student still far, keep Teacher)
+            r = r_extreme     otherwise                (Student close enough, trust Student more)
+
         Args:
-            scc_output: Successor module output [B, Seq, Embed]
-            prd_output: Predecessor module output [B, Seq, Embed]
-            y_label: Target label [B]
-            
+            scc_output: Successor module output  [...]
+            prd_output: Predecessor module output [...]
+            y_label:    Unused (kept for interface compatibility)
+
         Returns:
-            Optimal replacement rate
+            Optimal replacement rate in [0, 1]
         """
-        # FIX: Reduce 3D tensors to 1D (per-sample scalar) using Global Average Pooling
-        # scc_output shape: [Batch, Seq_len, Embed_dim] -> [Batch]
-        # prd_output shape: [Batch, Seq_len, Embed_dim] -> [Batch]
-        if scc_output.dim() == 3:
-            scc_mean = scc_output.mean(dim=(1, 2))  # [Batch]
-            prd_mean = prd_output.mean(dim=(1, 2))  # [Batch]
-        elif scc_output.dim() == 2:
-            scc_mean = scc_output.mean(dim=1)  # [Batch]
-            prd_mean = prd_output.mean(dim=1)  # [Batch]
-        else:
-            scc_mean = scc_output.flatten()
-            prd_mean = prd_output.flatten()
-        
-        # y_label is [Batch] containing class indices
-        y = y_label.float()
-        
-        # Now all tensors are 1D [Batch], can perform element-wise operations
-        # Compute |scc_i(y_i) - y_label|
-        scc_minus_label = (scc_mean - y).abs().mean().item()
-        
-        # Compute coefficients for quadratic equation
-        # a = (scc - prd)
-        # b = (prd - 2*scc + y_label)
-        a = (scc_mean - prd_mean).mean().item()
-        b = (prd_mean - 2 * scc_mean + y).mean().item()
-        
-        # Avoid division by zero
+        # Flatten both outputs to 1-D scalar per batch
+        scc_flat = scc_output.detach().reshape(scc_output.size(0), -1)  # [B, D]
+        prd_flat = prd_output.detach().reshape(prd_output.size(0), -1)  # [B, D]
+
+        # L2 distance per sample, then average over batch → scalar
+        # This IS in the same feature space: both are embed-dim vectors
+        l2_dist = (scc_flat - prd_flat).pow(2).mean(dim=1).sqrt()   # [B]
+        scc_minus_target = l2_dist.mean().item()  # scalar ≥ 0
+
+        # Direction of the gap (signed scalar)
+        a = (scc_flat - prd_flat).mean().item()
         if abs(a) < 1e-8:
-            return 0.0
-        
-        # Compute extreme point of quadratic
-        r_extreme = -b / (2 * a)
-        
-        # Compute Γ (extreme value of the gradient term)
-        # When r = r_extreme, the gradient term reaches its extreme
-        gamma = a * r_extreme ** 2 + b * r_extreme + scc_minus_label
-        
-        # Equation 12: Select optimal r
-        if scc_minus_label >= abs(gamma):
-            # Case A: r = 0 gives larger gradient
-            return 0.0
+            return 0.5  # neutral if indistinguishable
+
+        # b = prd - 2·scc + target  →  with target≡prd: b = prd - 2·scc + prd = 2(prd - scc) = -2a
+        b = -2.0 * a
+
+        # Extreme point of the quadratic in r
+        r_extreme = -b / (2.0 * a)   # = 1.0 always when target≡prd, clipped below
+
+        # Γ (value of gradient term at r_extreme)
+        gamma = a * r_extreme ** 2 + b * r_extreme + scc_minus_target
+
+        # Eq. 12: choose r
+        if scc_minus_target >= abs(gamma):
+            return 0.0   # Student far from Teacher → keep Teacher (r=0)
         else:
-            # Case C: Use r_extreme, but ensure it's in valid range
-            return max(0.0, min(1.0, r_extreme))
+            return max(0.0, min(1.0, r_extreme))  # Student close → let Student drive
     
     def forward(
         self, 
@@ -304,13 +286,21 @@ class OptimizedMixModule(nn.Module):
 
 class ProjectedMixModule(nn.Module):
     """
-    Mix module equipped with a Heterogeneous Feature Alignment (Projection) layer.
-    
-    Instead of directly returning the Successor's output (which may be in a different
-    mathematical space due to PoolFormer vs ViT architecture), this module projects
-    the Successor's output into the Predecessor's space before mixing.
+    Mix module with Heterogeneous Feature Alignment via Auxiliary Loss.
+
+    REDESIGN (Bug Fix): Previously, the Projection layer was injected INSIDE the
+    forward path so the Student learned to output features that 'needed' the
+    projection to look like the Teacher.  When fine_tune_successor() dropped the
+    projection the Student's features were suddenly misaligned → Massive
+    Distribution Shift → Loss explosion.
+
+    NEW DESIGN:
+    - forward() returns the RAW Successor output (no projection in the data path).
+    - get_alignment_loss() computes MSE(projection(student), teacher.detach())
+      as an AUXILIARY loss that is added to the main loss ONLY during Replacement
+      Training, then discarded at Deploy/Fine-tune time with zero side-effects.
     """
-    
+
     def __init__(
         self,
         predecessor_module: nn.Module,
@@ -322,37 +312,52 @@ class ProjectedMixModule(nn.Module):
         self.predecessor_module = predecessor_module
         self.successor_module = successor_module
         self.replacement_rate = replacement_rate
-        
-        # Non-linear projection to map PoolFormer features into ViT space
+
+        # Projection layer: maps Student features → Teacher feature space
+        # (auxiliary path only, NOT in the main forward)
         self.projection = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.LayerNorm(embed_dim)
         )
-        
-        self.predecessor_output = None
-        self.successor_output = None
-        self.projected_output = None
-        
+
+        # Cached outputs for auxiliary loss computation
+        self._predecessor_output: Optional[torch.Tensor] = None
+        self._successor_output: Optional[torch.Tensor] = None
+
     def forward(self, x: torch.Tensor, y_label: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Clean forward pass: returns raw Student output (no projection in data path).
+        Teacher output is cached for get_alignment_loss().
+        """
         with torch.no_grad():
-            self.predecessor_output = self.predecessor_module(x)
-            
-        self.successor_output = self.successor_module(x)
-        self.projected_output = self.projection(self.successor_output)
-        
+            self._predecessor_output = self.predecessor_module(x)
+
+        self._successor_output = self.successor_module(x)
+
         if self.training:
-            # Equation 5: Sample from Bernoulli distribution
+            # Hard Bernoulli replacement (same as Vanilla MixModule)
             r = torch.bernoulli(torch.tensor(1.0 - self.replacement_rate)).item()
-            
             if r == 1.0:
-                # Use Predecessor output (detached to freeze gradients)
-                return self.predecessor_output.detach()
+                return self._predecessor_output.detach()
             else:
-                # Use Project Successor output
-                return self.projected_output
+                return self._successor_output
         else:
-            # During inference, use Projected Successor output
-            return self.projected_output
+            return self._successor_output
+
+    def get_alignment_loss(self) -> Optional[torch.Tensor]:
+        """
+        Compute MSE between projected Student features and Teacher features.
+
+        Called externally by module_replacement_training() to add as an
+        auxiliary alignment loss.  At Fine-tune / Deploy this method is
+        never called, so the Projection layer plays no role whatsoever.
+
+        Returns None if forward() has not been called yet.
+        """
+        if self._successor_output is None or self._predecessor_output is None:
+            return None
+        projected = self.projection(self._successor_output)
+        return F.mse_loss(projected, self._predecessor_output.detach())
 
 
 class MixModel(nn.Module):
@@ -521,11 +526,12 @@ class BERTOfTheseus:
         successor: nn.Module,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
         initial_replacement_rate: float = 0.5,
-        use_optimization: bool = True,
+        use_optimization: bool = True,   # Fixed: L2-based Gradient-aware Routing
         use_kd_loss: bool = True,
         kd_T: float = 3.0,
         kd_alpha: float = 0.5,
-        use_soft_replacement: bool = False  # Đổi lại False để OptimizedMixModule được kích hoạt
+        use_soft_replacement: bool = False,
+        use_projection: bool = True       # Fixed: Auxiliary Loss (no Distribution Shift)
     ):
         self.predecessor = predecessor.to(device)
         self.successor = successor.to(device)
@@ -541,16 +547,13 @@ class BERTOfTheseus:
         # Get number of classes from classifier
         self.num_classes = successor.classifier.out_features
         
-        # Create Mix model:
-        # - use_soft_replacement=True  → SoftMixModule (alpha nội suy từ Teacher → Student)
-        # - use_projection=False       → Không gài Projection Layer vào giữa, tránh Distribution Shift
         self.mix_model = MixModel(
             predecessor,
             successor,
             initial_replacement_rate,
             use_optimization,
             use_soft_replacement=use_soft_replacement,
-            use_projection=False
+            use_projection=use_projection
         ).to(device)
         
         # Loss function: MSE (Equation 7) as per paper Section 3.2
@@ -731,28 +734,41 @@ class BERTOfTheseus:
             
             for batch_idx, (data, target) in enumerate(train_loader):
                 data, target = data.to(self.device), target.to(self.device)
-                
+
                 optimizer.zero_grad()
-                
+
                 if self.use_optimization:
                     output = self.mix_model(data, target)
                 else:
                     output = self.mix_model(data)
-                
+
                 # Convert target to one-hot for MSE loss (Equation 7)
                 target_onehot = self._to_onehot(target)
                 if self.use_kd_loss:
                     with torch.no_grad():
                         teacher_logits = self.predecessor(data)
                     loss = knowledge_distillation_loss(
-                        output, teacher_logits, target_onehot, 
+                        output, teacher_logits, target_onehot,
                         self.criterion, self.kd_T, self.kd_alpha
                     )
                 else:
                     loss = self.criterion(output, target_onehot)
+
+                # Auxiliary Alignment Loss from ProjectedMixModule (Fix B)
+                # Only active during Replacement Training; not used at Fine-tune/Deploy.
+                if getattr(self.mix_model, 'use_projection', False):
+                    aux_loss = torch.tensor(0.0, device=self.device)
+                    for mod in self.mix_model.mix_modules:
+                        if isinstance(mod, ProjectedMixModule):
+                            al = mod.get_alignment_loss()
+                            if al is not None:
+                                aux_loss = aux_loss + al
+                    # Weight the auxiliary loss (0.1 avoids overshadowing main loss)
+                    loss = loss + 0.1 * aux_loss
+
                 loss.backward()
                 optimizer.step()
-                
+
                 epoch_loss += loss.item()
             
             avg_loss = epoch_loss / len(train_loader)
