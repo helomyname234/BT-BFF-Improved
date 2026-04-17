@@ -1,7 +1,7 @@
-from .preprocessing import DataPreprocessor, SiamesePairDataset, IntrusionDataset
+from .preprocessing import DataPreprocessor, SiameseTripletDataset, IntrusionDataset
 from .dataset_loader import load_cicids2017, load_toniot
 
 __all__ = [
-    'DataPreprocessor', 'SiamesePairDataset', 'IntrusionDataset',
+    'DataPreprocessor', 'SiameseTripletDataset', 'IntrusionDataset',
     'load_cicids2017', 'load_toniot'
 ]
