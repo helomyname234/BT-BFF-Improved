@@ -23,7 +23,7 @@ from .models.siamese_network import SiameseNetwork, ContrastiveLoss, SiameseTrai
 from .models.predecessor import Predecessor
 from .models.successor import Successor
 from .models.bert_of_theseus import BERTOfTheseus
-from .data.preprocessing import DataPreprocessor, SiamesePairDataset, IntrusionDataset
+from .data.preprocessing import DataPreprocessor, SiameseTripletDataset, IntrusionDataset
 from .utils.metrics import compute_metrics, print_metrics, print_model_info
 
 
@@ -103,11 +103,11 @@ class BTPTFTrainer:
         Returns:
             Tuple of (train_loader, val_loader, test_loader)
         """
-        # Create Siamese pair dataset for Siamese training
-        siamese_dataset = SiamesePairDataset(
+        # Create Siamese triplet dataset for Siamese training
+        siamese_dataset = SiameseTripletDataset(
             train_features, 
             train_labels,
-            num_pairs=len(train_features)
+            num_triplets=len(train_features)
         )
         
         siamese_loader = DataLoader(
@@ -165,7 +165,7 @@ class BTPTFTrainer:
         )
         
         # Create dataset
-        dataset = SiamesePairDataset(
+        dataset = SiameseTripletDataset(
             train_features,
             train_labels,
             balance_by_class=self.config.data.siamese_balance_by_class

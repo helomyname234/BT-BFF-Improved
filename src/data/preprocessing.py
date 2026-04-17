@@ -159,33 +159,34 @@ class DataPreprocessor:
         return self.label_encoder.classes_.tolist()
 
 
-class SiamesePairDataset(Dataset):
+class SiameseTripletDataset(Dataset):
     """
-    Dataset for Siamese Network training.
+    Dataset for Siamese Network Triplet training.
     
-    Generates pairs of samples with labels:
-    - y = 1 if samples are from the same category
-    - y = 0 if samples are from different categories
+    Generates triplets of samples:
+    - anchor: A sample from a random class
+    - positive: Another sample from the same class as anchor
+    - negative: A sample from a different class
     
-    Reference: Section 3.1 of the paper
+    Reference: Section 3.1 of the paper (Improved to Triplet)
     """
     
     def __init__(
         self,
         features: np.ndarray,
         labels: np.ndarray,
-        num_pairs: Optional[int] = None,
+        num_triplets: Optional[int] = None,
         balance_by_class: bool = True
     ):
         """
         Args:
             features: Feature array
             labels: Label array
-            num_pairs: Number of pairs to generate (default: len(features))
+            num_triplets: Number of triplets to generate (default: len(features))
         """
         self.features = torch.tensor(features, dtype=torch.float32)
         self.labels = labels
-        self.num_pairs = num_pairs if num_pairs else len(features)
+        self.num_triplets = num_triplets if num_triplets else len(features)
         self.balance_by_class = balance_by_class
         
         # Group indices by class
@@ -198,44 +199,37 @@ class SiamesePairDataset(Dataset):
         self.unique_labels = list(self.class_indices.keys())
         
     def __len__(self) -> int:
-        return self.num_pairs
+        return self.num_triplets
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Returns a pair of samples and whether they're from the same class.
+        Returns an anchor, positive, and negative sample.
         
         Returns:
-            (sample1, sample2, is_same_class)
+            (anchor, positive, negative)
         """
-        # Randomly decide if we want a positive (same class) or negative pair
-        is_same_class = random.random() > 0.5
-        
         # Imbalance-aware anchor sampling:
         # If enabled, sample class first so minority classes are seen more often.
         if self.balance_by_class:
-            label1 = random.choice(self.unique_labels)
-            idx1 = random.choice(self.class_indices[label1])
+            label_anchor = random.choice(self.unique_labels)
+            idx_anchor = random.choice(self.class_indices[label_anchor])
         else:
-            idx1 = random.randint(0, len(self.features) - 1)
-            label1 = self.labels[idx1]
+            idx_anchor = random.randint(0, len(self.features) - 1)
+            label_anchor = self.labels[idx_anchor]
         
-        if is_same_class:
-            # Select second sample from same class
-            idx2 = random.choice(self.class_indices[label1])
-            y = 1.0
+        # Select positive sample from same class (could be same as anchor, but ideally different if enough exist)
+        idx_positive = random.choice(self.class_indices[label_anchor])
+        
+        # Select negative sample from different class
+        other_labels = [l for l in self.unique_labels if l != label_anchor]
+        if len(other_labels) > 0:
+            label_negative = random.choice(other_labels)
+            idx_negative = random.choice(self.class_indices[label_negative])
         else:
-            # Select second sample from different class
-            other_labels = [l for l in self.unique_labels if l != label1]
-            if len(other_labels) > 0:
-                label2 = random.choice(other_labels)
-                idx2 = random.choice(self.class_indices[label2])
-                y = 0.0
-            else:
-                # Fallback to same class if only one class exists
-                idx2 = random.choice(self.class_indices[label1])
-                y = 1.0
+            # Fallback (edge case if only one class exists, completely invalid for triplet but safe-guard)
+            idx_negative = random.choice(self.class_indices[label_anchor])
         
-        return self.features[idx1], self.features[idx2], torch.tensor(y, dtype=torch.float32)
+        return self.features[idx_anchor], self.features[idx_positive], self.features[idx_negative]
 
 
 class IntrusionDataset(Dataset):

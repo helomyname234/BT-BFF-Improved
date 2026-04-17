@@ -5,8 +5,8 @@ Implements the Siamese network architecture as described in Section 3.1 of the p
 
 The Siamese network:
 - Maps input data to a projection space
-- Uses Euclidean distance as similarity measure (Equation 1)
-- Uses Contrastive Loss for training (Equation 2)
+- Uses Euclidean distance as similarity measure
+- Uses Triplet Loss for training
 - Consists of 3-layer MLP with shared parameters
 
 Reference: Section 3.1 of Wang et al. (2024)
@@ -18,59 +18,38 @@ import torch.nn.functional as F
 from typing import Tuple
 
 
-class ContrastiveLoss(nn.Module):
+class TripletLoss(nn.Module):
     """
-    Contrastive Loss function for Siamese network training.
+    Triplet Margin Loss for Siamese network training.
     
-    Equation 2 from the paper:
-        L = (1/2N) * Σ[y*d² + (1-y)*max(margin-d, 0)²]
-    
-    Where:
-        - d: Euclidean distance between two samples
-        - y: Label (1 if same category, 0 if different)
-        - margin: Minimum distance threshold for dissimilar samples
+    Goal is to force d(anchor, positive) < d(anchor, negative) + margin
     
     Args:
-        margin: The margin for dissimilar pairs (default: 1.0 as per paper)
+        margin: The margin for dissimilar pairs (default: 0.3)
     """
     
-    def __init__(self, margin: float = 1.0):
-        super(ContrastiveLoss, self).__init__()
-        self.margin = margin
+    def __init__(self, margin: float = 0.3):
+        super(TripletLoss, self).__init__()
+        self.criterion = nn.TripletMarginLoss(margin=margin, p=2)
     
     def forward(
         self, 
-        embedding1: torch.Tensor, 
-        embedding2: torch.Tensor, 
-        y: torch.Tensor
+        anchor: torch.Tensor, 
+        positive: torch.Tensor, 
+        negative: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute Contrastive Loss.
+        Compute Triplet Margin Loss.
         
         Args:
-            embedding1: First embedding tensor (batch_size, embedding_dim)
-            embedding2: Second embedding tensor (batch_size, embedding_dim)
-            y: Labels tensor (batch_size,) - 1 for same class, 0 for different
+            anchor: Anchor embedding tensor (batch_size, embedding_dim)
+            positive: Positive embedding tensor (batch_size, embedding_dim)
+            negative: Negative embedding tensor (batch_size, embedding_dim)
             
         Returns:
-            Contrastive loss value
+            Triplet loss value
         """
-        # Equation 1: Euclidean distance
-        # d(p, q) = sqrt((p1-q1)² + (p2-q2)² + ... + (pn-qn)²)
-        euclidean_distance = F.pairwise_distance(embedding1, embedding2, keepdim=True)
-        
-        # Equation 2: Contrastive Loss
-        # L = (1/2N) * Σ[y*d² + (1-y)*max(margin-d, 0)²]
-        # When y=1 (same class): loss = d² (minimize distance)
-        # When y=0 (different class): loss = max(margin-d, 0)² (maximize distance up to margin)
-        
-        # Note: torch.mean() computes (1/N) * Σ[...], so we multiply by 0.5 for the (1/2N) factor
-        loss = 0.5 * torch.mean(
-            y * torch.pow(euclidean_distance, 2) +
-            (1 - y) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2)
-        )
-        
-        return loss
+        return self.criterion(anchor, positive, negative)
 
 
 class SiameseNetwork(nn.Module):
@@ -136,22 +115,25 @@ class SiameseNetwork(nn.Module):
     
     def forward(
         self, 
-        x1: torch.Tensor, 
-        x2: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        anchor: torch.Tensor, 
+        positive: torch.Tensor,
+        negative: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass for a pair of inputs.
+        Forward pass for a triplet of inputs.
         
         Args:
-            x1: First input tensor (batch_size, input_dim)
-            x2: Second input tensor (batch_size, input_dim)
+            anchor: Anchor input tensor (batch_size, input_dim)
+            positive: Positive input tensor (batch_size, input_dim)
+            negative: Negative input tensor (batch_size, input_dim)
             
         Returns:
-            Tuple of (embedding1, embedding2)
+            Tuple of (embedding_a, embedding_p, embedding_n)
         """
-        embedding1 = self.forward_one(x1)
-        embedding2 = self.forward_one(x2)
-        return embedding1, embedding2
+        embedding_a = self.forward_one(anchor)
+        embedding_p = self.forward_one(positive)
+        embedding_n = self.forward_one(negative)
+        return embedding_a, embedding_p, embedding_n
     
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -197,7 +179,7 @@ class SiameseTrainer:
     Trainer class for Siamese Network.
     
     Handles:
-    - Training with Contrastive Loss
+    - Training with Triplet Loss
     - Feature encoding after training
     """
     
@@ -210,7 +192,7 @@ class SiameseTrainer:
     ):
         self.model = model.to(device)
         self.device = device
-        self.criterion = ContrastiveLoss(margin=margin)
+        self.criterion = TripletLoss(margin=margin)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         
     def train_epoch(self, dataloader) -> float:
@@ -218,7 +200,7 @@ class SiameseTrainer:
         Train for one epoch.
         
         Args:
-            dataloader: DataLoader with SiamesePairDataset
+            dataloader: DataLoader with SiameseTripletDataset
             
         Returns:
             Average loss for the epoch
@@ -226,18 +208,18 @@ class SiameseTrainer:
         self.model.train()
         total_loss = 0.0
         
-        for batch_idx, (x1, x2, y) in enumerate(dataloader):
-            x1 = x1.to(self.device)
-            x2 = x2.to(self.device)
-            y = y.to(self.device).unsqueeze(1)
+        for batch_idx, (anchor, positive, negative) in enumerate(dataloader):
+            anchor = anchor.to(self.device)
+            positive = positive.to(self.device)
+            negative = negative.to(self.device)
             
             self.optimizer.zero_grad()
             
             # Forward pass
-            embedding1, embedding2 = self.model(x1, x2)
+            emb_a, emb_p, emb_n = self.model(anchor, positive, negative)
             
             # Compute loss
-            loss = self.criterion(embedding1, embedding2, y)
+            loss = self.criterion(emb_a, emb_p, emb_n)
             
             # Backward pass
             loss.backward()

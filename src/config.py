@@ -17,12 +17,12 @@ class SiameseConfig:
     
     From Section 5.2:
     - Hidden layer neurons: 5
-    - Margin in Contrastive Loss: 1
+    - Margin in Triplet Loss: 0.3
     - Output dimension: 36 (for 6×6 reshape)
     """
     hidden_dim: int = 5
     output_dim: int = 36  # For 6×6 reshape
-    margin: float = 1.0
+    margin: float = 0.3
 
 
 @dataclass
