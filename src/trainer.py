@@ -19,7 +19,7 @@ from typing import Dict, Tuple, Optional
 from tqdm import tqdm
 
 from .config import BTPTFConfig
-from .models.siamese_network import SiameseNetwork, ContrastiveLoss, SiameseTrainer
+from .models.siamese_network import SiameseNetwork, TripletLoss, SiameseTrainer
 from .models.predecessor import Predecessor
 from .models.successor import Successor
 from .models.bert_of_theseus import BERTOfTheseus
@@ -130,7 +130,7 @@ class BTPTFTrainer:
         
         As per Section 3.1:
         - 3-layer MLP with shared parameters
-        - Contrastive Loss with margin=1
+        - Triplet Loss with margin=0.3
         - Output: 36-dimensional embedding
         
         Args:

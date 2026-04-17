@@ -54,7 +54,7 @@ Sau tất cả các quá trình thử nghiệm và fix lỗi, cấu hình chính
 | `use_optimization` | ✅ `True` | OptimizedMixModule với L2 Distance (đã fix) |
 | `use_soft_replacement` | ❌ `False` | Bị vô hiệu hoá vì Projection được ưu tiên |
 | `use_kd_loss` | ✅ `True` | KL-Divergence ở output cuối cùng |
-| `aux_loss weight` | `0.1` | ProjectedMixModule alignment loss weight |
+| `aux_loss weight` | `0.07` | ProjectedMixModule alignment loss weight (sau khi thử 0.1, 0.03) |
 
 ## 6. Giảm Trọng số Auxiliary Alignment Loss: 0.1 → 0.03
 *[16/04/2026 - 20:11 → 22:25]*
@@ -77,7 +77,7 @@ Sau tất cả các quá trình thử nghiệm và fix lỗi, cấu hình chính
 **Thử tiếp: `aux_loss_weight = 0.07`**
 Lệch về phía 0.1 nhiều hơn vì dữ liệu cho thấy 0.1 chỉ tệ hơn 0.6% ở BENIGN trong khi 0.03 tệ hơn 3.1%. Điểm "ngọt" khả năng nằm gần 0.1 hơn là 0.03.
 
-## 7. Tắt Bỏ Hoàn Toàn Auxiliary Projection Loss (Dựa trên t-SNE)
+## 7. Thử Nghiệm với Auxiliary Projection Loss (Dựa trên t-SNE)
 *[17/04/2026 - 00:49]*
 
 **Kết quả thử nghiệm aux=0.07:**
@@ -92,7 +92,22 @@ Lệch về phía 0.1 nhiều hơn vì dữ liệu cho thấy 0.1 chỉ tệ hơ
 Trong không gian đặc trưng trung gian (intermediate feature space) của mạng Teacher (ViT), BENIGN và Hulk có những điểm tương đồng rất lớn. Khi sử dụng Auxiliary Alignment Loss để ép Student (PoolFormer) căn chỉnh theo Teacher, ta đã vô tình ép Student thừa hưởng chính sự mơ hồ này của Teacher ở cấp độ feature map.
 Ngược lại, **KD Loss** hoàn toàn ổn vì nó chỉ ép Student học theo các phân phối logit mềm (soft label) ở output cuối cùng, thời điểm mà Teacher đã phân biệt được các class bằng classifier head.
 
-**Quyết định cuối cùng:**
-- Tắt hoàn toàn Projection và Auxiliary Loss (`use_projection=False`).
-- Chỉ giữ lại **Vanilla Hard Mix + KD Loss + Balanced Sampler**.
-- Bộ combo này đảm bảo không gây nhiễu không gian đặc trưng của Student, đồng thời vẫn khai thác được Dark Knowledge (soft labels) từ Teacher để cải thiện khả năng tổng quát (bằng chứng là slowloris tăng đều qua mọi lần có KD Loss).
+---
+
+## 8. Siamese Network — Đổi từ Contrastive Loss sang Triplet Loss
+*[Branch: Sisame_Triplet - Tháng 4/2026]*
+
+**Thay đổi:** Đổi từ Contrastive Loss (Equation 2 của bài báo) sang Triplet Loss cho Siamese Network training.
+
+**Lý do cải tiến (từ improve_plan.md):**
+- Contrastive Loss chỉ so sánh từng cặp (Pairwise), đôi khi ép các mẫu khác loại ra quá xa mức cần thiết, làm nát latent space.
+- Triplet Loss giữ được cấu trúc topology tốt hơn, đặc biệt với dữ liệu network traffic có sự chồng chéo cao giữa các loại tấn công.
+
+**Thay đổi trong code:**
+- File: `src/models/siamese_network.py`
+- Thêm class `TripletLoss` (line 21-52)
+- `SiameseNetwork.forward()` giờ trả về `(anchor, positive, negative)` thay vì pair
+- `SiameseTripletDataset` sinh ra triplets (anchor, positive, negative) thay vì pairs
+- Margin: `0.3` (config.py line 25)
+
+**Tham chiếu:** improve_plan.md Section 3.1
